@@ -12,7 +12,7 @@
 	TODO:
 		1) make basic version work - just add drag
 				X Strip out FM calcs
-				- message handling to set drag
+				x message handling to set drag
 				x argument to set initial drag
 				- free/driven handling for voices
 				- change calcs to use actual rate, not input rate
@@ -115,6 +115,7 @@ typedef struct _drag {
 	t_double	drag;
 	t_double	  **hz;			// "master" pitch for each voice
 	t_double	  *hzFloat;
+	t_double	*hzActual;	// actual current pitch of the ball
 	t_double	  **symm;		// symmetry (per voice)
 	t_double  *grad;		// variable for optimising non-signal rate calcs of symm
 
@@ -126,6 +127,7 @@ typedef struct _drag {
 	t_double  *sinh;		// hyperbolic sine wavetable
 
 	t_bool	  *dcblock_on;
+	t_bool		*isfree;	// free/driven status for ball
 	t_double	  *dc_prev_in;	// history for dcblock
 	t_double	  *dc_prev_out;
 
@@ -221,6 +223,7 @@ void drag_dsp_free (t_drag *x)
 	t_freebytes(x->out, x->voice_count * sizeof(t_double *));
 	t_freebytes(x->symm, x->voice_count * sizeof(t_double *));
 	t_freebytes(x->hzFloat, x->voice_count * sizeof(t_double ));
+	t_freebytes(x->hzActual, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->grad, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->ball_loc, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->shape, x->voice_count * sizeof(t_double ));
@@ -232,7 +235,7 @@ void drag_dsp_free (t_drag *x)
 	t_freebytes(x->dc_prev_out, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->sin, LKTBL_LNGTH * sizeof(t_double ));
 	t_freebytes(x->sinh, LKTBL_LNGTH * sizeof(t_double ));
-
+	t_freebytes(x->isfree, x->voice_count * sizeof(t_bool ));
 
 
 }
@@ -286,6 +289,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->symm = (t_double **) t_getbytes(x->voice_count * sizeof(t_double *));
 	x->out = (t_double **) t_getbytes(x->voice_count * sizeof(t_double *));
 	x->hzFloat = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
+	x->hzActual = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->grad = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->ball_loc = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->direction = (t_int *) t_getbytes(x->voice_count * sizeof(t_int));
@@ -297,6 +301,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->shape = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->sin = (t_double *)  t_getbytes(LKTBL_LNGTH * sizeof(t_double)); 
 	x->sinh = (t_double *)  t_getbytes(LKTBL_LNGTH * sizeof(t_double)); 
+	x->isfree = (t_bool *) t_getbytes(x->voice_count * sizeof(t_bool));
 
 	setup_lktables(x,0); // build lookup tables for waveshaper
 
@@ -308,7 +313,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 
 		x->shape[i] = 0.1f;
 		x->grad[i] = 2;
-		x->hzFloat[i] = 100;
+		x->hzActual[i] = x->hzFloat[i] = 100;
 		x->ball_loc[i] =  (x->ball_loc[i-1] + THINNESTPIPE); // begin near bottom of current bound
 		dir *= -1,  x->direction[i] = dir;	// alternate up and down 
 		x->dcblock_on[i] = 0;
@@ -667,17 +672,27 @@ void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, 
 				this_hi = this_lo + THINNESTPIPE;
 			}
 			width = this_hi - this_lo;
-			// get freq from freq modulation
 
-			f0 = *hz[v];
+			//drag calculations to get actual rate
+			// apply drag if ball is not being driven (if input hz <= current hz)
+			if(x->hzActual[v] > *hz[v]) { //FREE - apply drag
+				x->isfree[v] = 1;
+				x->hzActual[v] = x->hzActual[v] - (x->hzActual[v] * x->drag);
+				if(x->hzActual[v] < *hz[v]) f0 = x->hzActual[v] = *hz[v];
+			} else {					//DRIVEN - don't apply drag
+				x->isfree[v] = 0;
+				x->hzActual[v] = *hz[v];
+			}
 
 			// determine freq & gradient limits at this width
 			fmax = x->fmax * width;
 			// apply limits
-			if(f0>fmax) {
+			if(x->hzActual[v]>fmax) {
 				f0 = fmax;
-			} else if (f0 < FMIN) {
+			} else if (x->hzActual[v] < FMIN) {
 				f0 = FMIN;
+			} else {
+				f0 = x->hzActual[v];
 			}
 			t = f0/x->srate;
 

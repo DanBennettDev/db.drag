@@ -11,9 +11,9 @@
 	
 	TODO:
 		1) make basic version work - just add drag
-				- Strip out FM calcs
+				X Strip out FM calcs
 				- message handling to set drag
-				- argument to set initial drag
+				x argument to set initial drag
 				- free/driven handling for voices
 				- change calcs to use actual rate, not input rate
 				- drag calculations
@@ -67,14 +67,22 @@ Output modes
 
 #define sign(a) ( ( (a) < 0 )  ?  -1   : ( (a) > 0 ) )
 
-#define MAX_VOICES 10
-#define THINNESTPIPE 0.0044		// the smallest distance allowed between bounds
+#define BOUND_L_MIN -99.
+#define BOUND_H_MAX 99.
+#define BOUND_L_DEFAULT -1.0
+#define BOUND_H_DEFAULT 1.0
 #define DCBLOCK_GAIN 0.998		// Steepness of DC block filter 
-#define SYMMMIN 0.001
-#define SYMMMAX 0.999
+#define DRAG_DEFAULT 0.1
+#define DRAGMIN 0
+#define DRAGMAX 0.999
 #define FMIN 0.001
 #define FMAX 15000.f
 #define LKTBL_LNGTH 2048
+#define MAX_VOICES 10
+#define SYMMMIN 0.001
+#define SYMMMAX 0.999
+#define THINNESTPIPE 0.0044		// the smallest distance allowed between bounds
+
 
 #define DEBUG_ON 0
 #define POLL_PER_SAMPLES 10000	// debugging - report at this number of sample calculations
@@ -100,18 +108,15 @@ Output modes
 typedef struct _drag {
 	t_pxobject	obj;			
 	t_double  srate;
-	t_double  slx4; // sample len * 4 
 	t_double  fmax;
 
 	t_double	  bound_lo;		// lower bound for entire ensemble
 	t_double	  bound_hi;		// upper bound for entire ensemble
+	t_double	drag;
 	t_double	  **hz;			// "master" pitch for each voice
 	t_double	  *hzFloat;
 	t_double	  **symm;		// symmetry (per voice)
-	t_double  *grad;		// variables for optimising non-signal rate calcs of symm
-	t_double  *gradb;
-	t_double  *aOverb;
-	t_double  *bOvera;
+	t_double  *grad;		// variable for optimising non-signal rate calcs of symm
 
 	t_double  *ball_loc;	// location of the ball
 	t_int	  *direction;	// current direction of ball (-1/1)
@@ -153,7 +158,7 @@ void	drag_float(t_drag *x, double f);
 void	drag_dcblock_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_shape_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
-
+void 	drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 
 // Audio Calc functions
 void 	drag_PerformWrapper(t_drag *x, t_object *dsp64, double **ins, long numins, double **outs, long numouts, long sampleframes, long flags, void *userparam);
@@ -192,7 +197,7 @@ int C74_EXPORT main (void)
 	class_addmethod(drag_class, (method)drag_dcblock_set, "dc", A_GIMME, 0);
 	class_addmethod(drag_class, (method)drag_shape_set, "shape", A_GIMME, 0);
 	class_addmethod(drag_class, (method)drag_fmax_set, "fmax", A_GIMME, 0);
-	
+	class_addmethod(drag_class, (method)drag_drag_set, "drag", A_GIMME, 0);
 
 	class_dspinit(drag_class);
 	class_register(CLASS_BOX, drag_class);
@@ -217,9 +222,6 @@ void drag_dsp_free (t_drag *x)
 	t_freebytes(x->symm, x->voice_count * sizeof(t_double *));
 	t_freebytes(x->hzFloat, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->grad, x->voice_count * sizeof(t_double ));
-	t_freebytes(x->gradb, x->voice_count * sizeof(t_double ));
-	t_freebytes(x->aOverb, x->voice_count * sizeof(t_double ));
-	t_freebytes(x->bOvera, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->ball_loc, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->shape, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->direction, x->voice_count * sizeof(t_int ));
@@ -244,6 +246,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	t_drag *x = object_alloc(drag_class); // set aside memory for the struct for the object
 
 	x->mode = 0;
+	x->drag = DRAG_DEFAULT;
 	x->fmax = FMAX * 0.5;
 	x->bound_lo = bound_lo; 
 	x->bound_hi = bound_hi;
@@ -253,6 +256,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->mode = atom_getintarg(3,argc,argv); 
 	if(x->mode < 0) x->mode = 0;
 	else if (x->mode > 1) x->mode = 1;
+	atom_arg_getdouble(&(x->drag), 4, argc, argv);
 
 	//protect against invalid parameters
 	if(x->voice_count > MAX_VOICES) {
@@ -260,6 +264,19 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	} else if (x->voice_count < 1) {
 		x->voice_count = 1; 
 	}
+	if (x->bound_lo < BOUND_L_MIN) x->bound_lo = BOUND_L_MIN;
+	if (x->bound_hi > BOUND_H_MAX) x->bound_lo = BOUND_H_MAX;
+	if(x->bound_lo >= x->bound_hi) {
+		x->bound_lo = BOUND_L_MIN;
+		x->bound_hi = BOUND_H_MAX;
+		post("invalid args for bounds, set to %f, %f", BOUND_L_MIN, BOUND_H_MAX);
+	}
+	if (x->drag < DRAGMIN || x->drag > DRAGMAX) {
+		post("invalid arg for drag, %f", DRAG_DEFAULT);
+		x->drag = DRAG_DEFAULT;
+	}
+
+
 	// add to dsp chain, set up inlets 
 	dsp_setup((t_pxobject *)x, 2*x->voice_count + 2); // upper and lower bounds, plus hz and symm per voice
 	x->obj.z_misc |= Z_NO_INPLACE; // force independent signal vectors
@@ -270,9 +287,6 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->out = (t_double **) t_getbytes(x->voice_count * sizeof(t_double *));
 	x->hzFloat = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->grad = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
-	x->gradb = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
-	x->aOverb = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
-	x->bOvera = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->ball_loc = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->direction = (t_int *) t_getbytes(x->voice_count * sizeof(t_int));
 	x->hz_conn = (t_int *) t_getbytes(x->voice_count * sizeof(t_int));
@@ -304,7 +318,6 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 
 	// initialize remaining parameters
 	x->srate = (t_double)sys_getsr();
-	x->slx4 = (4 / x->srate);
 
 #if DEBUG_ON == 1|| DEBUG_ON == 2
 	x->poll_count = POLL_NO_SAMPLES-1;
@@ -322,7 +335,6 @@ void	drag_dsp64(t_drag *x, t_object *dsp64, short *count, double samplerate, lon
 	// Check sample rate in object against vector and update if neccessary
 	if(x->srate != samplerate){
 		x->srate = samplerate;
-		x->slx4 =  (4 / samplerate);
 	}
 
 	object_method(dsp64, gensym("dsp_add64"), x, drag_PerformWrapper, 0, NULL);
@@ -366,7 +378,7 @@ void drag_assist(t_drag *x, void *b, long msg, long arg, char *dst)
 
 void drag_float(t_drag *x, double f)
 {
-	double grad, gradb;
+	double grad;
 	double symm;
 	int inlet = ((t_pxobject*)x)->z_in;
 
@@ -384,11 +396,7 @@ void drag_float(t_drag *x, double f)
 				else symm = f;
 				
 				grad  = 1/symm;
-				gradb = -grad/(grad-1);
-				x->aOverb[inlet - (2 + x->voice_count)] = grad/gradb;
-				x->bOvera[inlet - (2 + x->voice_count)] = gradb/grad;
 				x->grad[inlet - (2 + x->voice_count)] = grad;
-				x->gradb[inlet - (2 + x->voice_count)] = gradb;
 			}
 			break;
 	}
@@ -451,6 +459,17 @@ void drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 
 
 
+
+// MSG "drag" symbol input + float sets global drag
+void drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
+{
+	t_double f, exp;
+	atom_arg_getdouble(&f, 0, argc, argv);
+	if(f<=DRAGMAX && f>=DRAGMIN){
+		exp = 1/x->srate;
+		x->drag = pow(f,exp);
+	}
+}
 
 
 /************************************************************

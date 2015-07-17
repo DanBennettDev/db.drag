@@ -14,9 +14,11 @@
 				X Strip out FM calcs
 				x message handling to set drag
 				x argument to set initial drag
-				- free/driven handling for voices
-				- change calcs to use actual rate, not input rate
-				- drag calculations
+				x free/driven handling for voices
+				x change calcs to use actual rate, not input rate
+				x drag calculations
+				- get signal inputs working for hz
+				- Make Drag calcs actually do something!
 
 		2) Output Modes
 
@@ -71,12 +73,19 @@ Output modes
 #define BOUND_H_MAX 99.
 #define BOUND_L_DEFAULT -1.0
 #define BOUND_H_DEFAULT 1.0
-#define DCBLOCK_GAIN 0.998		// Steepness of DC block filter 
-#define DRAG_DEFAULT 0.1
-#define DRAGMIN 0
-#define DRAGMAX 0.999
-#define FMIN 0.001
-#define FMAX 15000.f
+#define DCBLOCK_GAIN 0.998		   // Steepness of DC block filter
+#define DRAGCURVE 1			  	  // default Scaling for drag vs freq
+#define DRAGCURVEMIN 0.7	     // minimum scaling
+#define DRAGCURVEMAX 1			// max scaling
+#define DRAG_DEFAULT 0.01	   // Default (input) value for drag
+
+#define DRAGMIN_IN 0		  // min input from max for drag param 0 127 0.0002 1. 1.09
+#define DRAGMIN_OUT 0.000002 // min scaled value
+#define DRAGMAX_IN 127.		// min input from max
+#define DRAGMAX_OUT 1   // max scaled value
+#define DRAGSCALER 1.09	  // exponent for scaling
+#define FMIN 0.001			 // minimum freq for ball
+#define FMAX 15000.f		// maximum freq for ball
 #define LKTBL_LNGTH 2048
 #define MAX_VOICES 10
 #define SYMMMIN 0.001
@@ -113,6 +122,7 @@ typedef struct _drag {
 	t_double	  bound_lo;		// lower bound for entire ensemble
 	t_double	  bound_hi;		// upper bound for entire ensemble
 	t_double	drag;
+	t_double	dragCurve;
 	t_double	  **hz;			// "master" pitch for each voice
 	t_double	  *hzFloat;
 	t_double	*hzActual;	// actual current pitch of the ball
@@ -161,10 +171,12 @@ void	drag_dcblock_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_shape_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void 	drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
+void 	drag_dragcurv_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
+
 
 // Audio Calc functions
 void 	drag_PerformWrapper(t_drag *x, t_object *dsp64, double **ins, long numins, double **outs, long numouts, long sampleframes, long flags, void *userparam);
-void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, void (*voicemode)(void *, t_double, t_double, t_double, t_double));
+void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, void (*voicemode)(t_drag *, t_double, t_double, t_double, t_double));
 void	 drag_ptr_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t);
 void 	drag_shaper_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t);
 
@@ -200,6 +212,7 @@ int C74_EXPORT main (void)
 	class_addmethod(drag_class, (method)drag_shape_set, "shape", A_GIMME, 0);
 	class_addmethod(drag_class, (method)drag_fmax_set, "fmax", A_GIMME, 0);
 	class_addmethod(drag_class, (method)drag_drag_set, "drag", A_GIMME, 0);
+	class_addmethod(drag_class, (method)drag_dragcurv_set, "dragcurve", A_GIMME, 0);
 
 	class_dspinit(drag_class);
 	class_register(CLASS_BOX, drag_class);
@@ -250,6 +263,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 
 	x->mode = 0;
 	x->drag = DRAG_DEFAULT;
+	x->dragCurve = DRAGCURVE;
 	x->fmax = FMAX * 0.5;
 	x->bound_lo = bound_lo; 
 	x->bound_hi = bound_hi;
@@ -274,11 +288,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 		x->bound_hi = BOUND_H_MAX;
 		post("invalid args for bounds, set to %f, %f", BOUND_L_MIN, BOUND_H_MAX);
 	}
-	if (x->drag < DRAGMIN || x->drag > DRAGMAX) {
-		post("invalid arg for drag, %f", DRAG_DEFAULT);
-		x->drag = DRAG_DEFAULT;
-	}
-
+	x->drag = DRAG_DEFAULT;
 
 	// add to dsp chain, set up inlets 
 	dsp_setup((t_pxobject *)x, 2*x->voice_count + 2); // upper and lower bounds, plus hz and symm per voice
@@ -344,6 +354,7 @@ void	drag_dsp64(t_drag *x, t_object *dsp64, short *count, double samplerate, lon
 
 	object_method(dsp64, gensym("dsp_add64"), x, drag_PerformWrapper, 0, NULL);
 
+
 	// check if signals are connected
 	x->bound_lo_conn = count[0];
 	x->bound_hi_conn = count[1];
@@ -351,7 +362,6 @@ void	drag_dsp64(t_drag *x, t_object *dsp64, short *count, double samplerate, lon
 		x->hz_conn[i] = count[i+2];
 		x->symm_conn[i] = count[i + 2 + x->voice_count];
 	}
-
 
 }
 
@@ -363,10 +373,10 @@ void drag_assist(t_drag *x, void *b, long msg, long arg, char *dst)
 		case 0: sprintf(dst,"(signal/float) Lower Bound"); break;
 		case 1: sprintf(dst,"(signal/float) Upper Bound"); break;
 		default:
-			if(arg > 1 && arg < x->voice_count + 1){
+			if(arg > 1 && arg < x->voice_count + 2 ){
 				sprintf(dst,"(signal/float) freq %ld", arg - 1);
 			} else {
-				sprintf(dst,"(signal/float) symmetry %d, (0-1)", (int)(arg - x->voice_count));
+				sprintf(dst,"(signal/float) symmetry %d, (0-1)", (int)(arg - x->voice_count -1));
 			}				
 			break;
 		}
@@ -410,9 +420,10 @@ void drag_float(t_drag *x, double f)
 // MSG BANG input - outputs list of values in output buffer
 void drag_bang(t_drag *x, t_double f)
 {
-
-	post("%f", x->fmax);
-
+	int i;
+    for(i=0; i < x->voice_count; i++){
+    	post("voice %d : %d", i, x->hz_conn[i]);
+    }
 
 	post("bang does nowt");
 }
@@ -468,12 +479,27 @@ void drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 // MSG "drag" symbol input + float sets global drag
 void drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 {
-	t_double f, exp;
+	t_double f;
 	atom_arg_getdouble(&f, 0, argc, argv);
-	if(f<=DRAGMAX && f>=DRAGMIN){
-		exp = 1/x->srate;
-		x->drag = pow(f,exp);
+	if (f<0) f=0;
+	if (f>1) f=1;
+	x->drag= danScaler(f*127., DRAGMIN_IN, DRAGMAX_IN, DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
+	post("%f", x->drag);
+}
+
+// MSG "drag" symbol input + float sets global drag
+void drag_dragcurv_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
+{
+	t_double f;
+	atom_arg_getdouble(&f, 0, argc, argv);
+	if(f<=0){
+		x->dragCurve = DRAGCURVEMIN;
+	} else if (f>1){
+		x->dragCurve = DRAGCURVEMAX;
+	} else {
+		x->dragCurve = (f * (DRAGCURVEMAX - DRAGCURVEMIN)) + DRAGCURVEMIN;
 	}
+	post("%f", x->dragCurve);
 }
 
 
@@ -596,14 +622,14 @@ double do_shaping (t_drag *x, t_double lo, t_double hi)
 void 	drag_PerformWrapper(t_drag *x, t_object *dsp64, double **ins, long numins, double **outs, long numouts, long sampleframes, long flags, void *userparam)
 {
 	if(x->mode==0){
-		drag_perform64(x, ins, outs, sampleframes, drag_shaper_voicecalc);
+		drag_perform64(x, ins, outs, sampleframes, &drag_shaper_voicecalc);
 	} else{
-		drag_perform64(x, ins, outs, sampleframes, drag_ptr_voicecalc);
+		drag_perform64(x, ins, outs, sampleframes, &drag_ptr_voicecalc);
 	}
 }
 
 
-void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, void (*voicemode)(void *, t_double, t_double, t_double, t_double))
+void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, void (*voicemode)(t_drag *, t_double, t_double, t_double, t_double))
 {	
 	t_double **hz, **symm, **out;
 	t_double *bound_lo, *bound_hi;
@@ -632,7 +658,7 @@ void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, 
 	// hz inputs,
 	for  (i = 0; i< x->voice_count; i++){
 		if(x->hz_conn[i]){	// if signal connected, point at signal in
-			hz[i] = (t_double *) (ins[i + 1]);
+			hz[i] = (t_double *) (ins[i + 2]);
 		} else{				// if not, point at value in drag object
 			hz[i] = &(x->hzFloat[i]);
 		}
@@ -677,7 +703,7 @@ void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, 
 			// apply drag if ball is not being driven (if input hz <= current hz)
 			if(x->hzActual[v] > *hz[v]) { //FREE - apply drag
 				x->isfree[v] = 1;
-				x->hzActual[v] = x->hzActual[v] - (x->hzActual[v] * x->drag);
+				x->hzActual[v] = x->hzActual[v] - (pow(x->hzActual[v],x->dragCurve) * x->drag);
 				if(x->hzActual[v] < *hz[v]) f0 = x->hzActual[v] = *hz[v];
 			} else {					//DRIVEN - don't apply drag
 				x->isfree[v] = 0;

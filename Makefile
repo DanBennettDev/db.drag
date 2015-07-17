@@ -49,13 +49,13 @@ clean64:
 	-rm -f $(P).mxe64 $(P).o
 
 object64:
-	$(CC) -c -g -Wall -Wno-unknown-pragmas -O3 $(COMPFLAGS) $(MAXINC) $(P).c
+	$(CC) -c -std=c99 -g -Wall -Wno-unknown-pragmas -pedantic -O3 $(COMPFLAGS) $(MAXINC) $(P).c
 
 mxe64:
-	$(CC) -shared -Wall $(DLLFLAGS) -o $(P).mxe64 $(P).o $(P).def $(MAXLD_LOC) $(MAXLD_FLAGS)
+	$(CC) -std=c99 -shared -Wall $(DLLFLAGS) -o $(P).mxe64 $(P).o $(P).def $(MAXLD_LOC) $(MAXLD_FLAGS)
 	
 object32:
-	$(CC32) -c -g -Wno-unknown-pragmas -O3 $(COMPFLAGS) $(MAXINC) $(P).c	
+	$(CC32) -c -std=c99 -g -Wno-unknown-pragmas -O3 $(COMPFLAGS) $(MAXINC) $(P).c	
 
 mxe32:
-	$(CC32) -shared -Wall $(DLLFLAGS) -o $(P).mxe $(P).o $(P).def $(MAXLD_LOC32) $(MAXLD_FLAGS)
+	$(CC32) -std=c99 -shared -Wall $(DLLFLAGS) -o $(P).mxe $(P).o $(P).def $(MAXLD_LOC32) $(MAXLD_FLAGS)

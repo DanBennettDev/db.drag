@@ -80,7 +80,7 @@ Output modes
 #define DRAG_DEFAULT 0.01	   // Default (input) value for drag
 
 #define DRAGMIN_IN 0		  // min input from max for drag param 0 127 0.0002 1. 1.09
-#define DRAGMIN_OUT 0.000002 // min scaled value
+#define DRAGMIN_OUT 0.0000002 // min scaled value
 #define DRAGMAX_IN 127.		// min input from max
 #define DRAGMAX_OUT 1   // max scaled value
 #define DRAGSCALER 1.09	  // exponent for scaling
@@ -483,7 +483,8 @@ void drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 	atom_arg_getdouble(&f, 0, argc, argv);
 	if (f<0) f=0;
 	if (f>1) f=1;
-	x->drag= danScaler(f*127., DRAGMIN_IN, DRAGMAX_IN, DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
+	f = danScaler(f*127., DRAGMIN_IN, DRAGMAX_IN, DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
+	x->drag = f/10;
 	post("%f", x->drag);
 }
 

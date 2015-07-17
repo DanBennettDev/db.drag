@@ -74,7 +74,6 @@ Output modes
 #define SYMMMAX 0.999
 #define FMIN 0.001
 #define FMAX 15000.f
-#define MAXFM 40
 #define LKTBL_LNGTH 2048
 
 #define DEBUG_ON 0
@@ -116,7 +115,6 @@ typedef struct _drag {
 
 	t_double  *ball_loc;	// location of the ball
 	t_int	  *direction;	// current direction of ball (-1/1)
-	t_double	  **fm;			// 2d matrix controling cross modulation between voices
 	t_double	  *shape;
 	t_double	  **out;		// output pointer
 	t_double  *sin;			// sine wavetable
@@ -139,7 +137,6 @@ typedef struct _drag {
 	t_int stopdebug;	// DEBUG
 	t_int debug_count;	// DEBUG
 #endif
-	t_bool fm_on; // controls whether cross modulation is on or off (saves computation)
 }	t_drag;
 
 static t_class *drag_class;	// pointer to the class of this object
@@ -154,7 +151,6 @@ void	drag_dsp_free(t_drag *x);
 void	drag_bang(t_drag *x, double f);		
 void	drag_float(t_drag *x, double f);	
 void	drag_dcblock_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
-void	drag_fm_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_shape_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 
@@ -166,7 +162,6 @@ void	 drag_ptr_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_
 void 	drag_shaper_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t);
 
 t_double  drag_dcblock(t_double input, t_double *lastinput, t_double *lastoutput, t_double gain);
-t_double drag_fmcalc (t_drag *x, t_int curr_voice);
 t_double ptr_correctmax(t_double p, t_double a, t_double b, t_double t, t_double pmin, t_double pmax);
 t_double ptr_correctmin(t_double p, t_double a, t_double b, t_double t, t_double pmin, t_double pmax);
 void	 setup_lktables (t_drag* x, t_int shape);
@@ -175,7 +170,6 @@ double	 drag_alimit(double a, double width, double t);
 
 // my infrastructure functions
 double infr_scale_param(double in, double in_min, double in_max, double out_min, double out_max);
-void	drag_fm_onoff(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 
 
 /************************************************************
@@ -196,8 +190,6 @@ int C74_EXPORT main (void)
 	class_addmethod(drag_class, (method)drag_bang, "bang", A_FLOAT, 0);
 	class_addmethod(drag_class, (method)drag_float, "float", A_FLOAT, 0);
 	class_addmethod(drag_class, (method)drag_dcblock_set, "dc", A_GIMME, 0);
-	class_addmethod(drag_class, (method)drag_fm_set, "fm", A_GIMME, 0);
-	class_addmethod(drag_class, (method)drag_fm_onoff, "fmoff", A_GIMME, 0);
 	class_addmethod(drag_class, (method)drag_shape_set, "shape", A_GIMME, 0);
 	class_addmethod(drag_class, (method)drag_fmax_set, "fmax", A_GIMME, 0);
 	
@@ -218,8 +210,6 @@ int C74_EXPORT main (void)
 
 void drag_dsp_free (t_drag *x)
 {
-	int i;
-
 	dsp_free((t_pxobject *)x);
 
 	t_freebytes(x->hz, x->voice_count * sizeof(t_double *));
@@ -241,10 +231,6 @@ void drag_dsp_free (t_drag *x)
 	t_freebytes(x->sin, LKTBL_LNGTH * sizeof(t_double ));
 	t_freebytes(x->sinh, LKTBL_LNGTH * sizeof(t_double ));
 
-	for (i =0; i < x->voice_count; i++){
-			t_freebytes(x->fm[i], x->voice_count * sizeof(t_double));
-		}
-	t_freebytes(x->fm, x->voice_count * sizeof(t_double *));
 
 
 }
@@ -254,7 +240,7 @@ void drag_dsp_free (t_drag *x)
 void *drag_new(t_symbol *s, short argc, t_atom *argv)
 {
 	t_double bound_lo = -1.0, bound_hi = 1.0;
-	t_int i = 0, j = 0, dir = -1;
+	t_int i = 0, dir = -1;
 	t_drag *x = object_alloc(drag_class); // set aside memory for the struct for the object
 
 	x->mode = 0;
@@ -294,7 +280,6 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->dcblock_on = (t_bool *) t_getbytes(x->voice_count * sizeof(t_bool));
 	x->dc_prev_in = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->dc_prev_out = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
-	x->fm = (t_double **) t_getbytes(x->voice_count * sizeof(t_double *));
 	x->shape = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->sin = (t_double *)  t_getbytes(LKTBL_LNGTH * sizeof(t_double)); 
 	x->sinh = (t_double *)  t_getbytes(LKTBL_LNGTH * sizeof(t_double)); 
@@ -305,7 +290,6 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->ball_loc[0] = bound_lo + THINNESTPIPE; 
 	x->direction[0] = 1;
 	for(i=0; i < x->voice_count; i++){
-		x->fm[i] = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 		outlet_new((t_object *)x, "signal"); 
 
 		x->shape[i] = 0.1f;
@@ -315,15 +299,12 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 		dir *= -1,  x->direction[i] = dir;	// alternate up and down 
 		x->dcblock_on[i] = 0;
 		x->dc_prev_in[i] = x->dc_prev_out[i] = 0.f;
-		for(j =0; j< x->voice_count; j++){
-			x->fm[i][j] = 0.0;
-		}
+
 	}
 
 	// initialize remaining parameters
 	x->srate = (t_double)sys_getsr();
 	x->slx4 = (4 / x->srate);
-	x->fm_on = 0;
 
 #if DEBUG_ON == 1|| DEBUG_ON == 2
 	x->poll_count = POLL_NO_SAMPLES-1;
@@ -368,7 +349,7 @@ void drag_assist(t_drag *x, void *b, long msg, long arg, char *dst)
 			if(arg > 1 && arg < x->voice_count + 1){
 				sprintf(dst,"(signal/float) freq %ld", arg - 1);
 			} else {
-				sprintf(dst,"(signal/float) symmetry %d, (0-1)", arg - x->voice_count);
+				sprintf(dst,"(signal/float) symmetry %d, (0-1)", (int)(arg - x->voice_count));
 			}				
 			break;
 		}
@@ -468,54 +449,6 @@ void drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 }
 
 
-// MSG "fm" symbol input, controls modulation amounts via list of 2 ints and a float (from, to, amt)
-void	drag_fm_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
-{
-	t_int in, out;
-	t_double val = 0;
-	if(argc == 3){
-			in =  atom_getintarg(0,argc, argv);
-			out = atom_getintarg(1,argc, argv);
-			atom_arg_getdouble(&val, 2, argc, argv);
-			in -= 1, out -=1;
-
-			if(in <0 || in >= x->voice_count || out <0 || out >= x->voice_count){
-				post("ERROR - invalid cross mod argument");
-				in = 0, out = 0, val = 0;
-			} else {
-			x->fm[in][out] = val < MAXFM ? val: MAXFM;
-			}
-			
-			if(val == 0.){
-				// check if any other modulation is on, and set fm_on flag accordingly
-				for(in = 0; in < x->voice_count; in++){
-					for(out = 0; out < x->voice_count; out++){
-						if(fabs(x->fm[in][out]) > 0.0001){
-							x->fm_on = 1;
-							goto quit_check_loop;
-						}
-					}
-					x->fm_on = 0; // only reached if no modulation is on
-				}
-			}else{
-				x->fm_on = 1;
-			}
-	}
-quit_check_loop:
-	;
-}
-
-// MSG "fmoff" symbol input, turns off modulation
-void	drag_fm_onoff(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
-{
-	int in, out;
-	for(in = 0; in < x->voice_count; in++){
-		for(out = 0; out < x->voice_count; out++){
-				x->fm[in][out] = 0;
-		}
-	}	
-	x->fm_on = 0;
-}
 
 
 
@@ -549,26 +482,6 @@ t_double drag_dcblock(t_double input, t_double *lastinput, t_double *lastoutput,
 	return output;
 }
 
-t_double drag_fmcalc (t_drag *x, t_int curr_voice)
-{	
-	t_double  modsum, modhz;
-	t_int i;
-	if(x->fm_on){
-		//get sum of modulations
-		modsum = 1;
-		for(i =0; i <x->voice_count; i++){
-			if(x->fm[i][curr_voice] != 0){	//i!=curr_voice && 
-				modsum += x->ball_loc[i] * x->fm[i][curr_voice];
-			}
-		}
-		// apply modulation to freq of this voice
-		modhz = fabs(*(x->hz[curr_voice]) * modsum);
-		modhz = modhz < 0 ? 0 : modhz;
-		return modhz;
-	} else {
-		return *x->hz[curr_voice];
-	}
-}
 
 // Correction functions for Polynomial Transition Region algorithm
 t_double ptr_correctmax(t_double p, t_double a, t_double b, t_double t, t_double pmin, t_double pmax)
@@ -736,7 +649,9 @@ void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, 
 			}
 			width = this_hi - this_lo;
 			// get freq from freq modulation
-			f0 = drag_fmcalc (x, v);
+
+			f0 = *hz[v];
+
 			// determine freq & gradient limits at this width
 			fmax = x->fmax * width;
 			// apply limits

@@ -1,0 +1,4 @@
+LIBRARY drag~.mxe
+
+EXPORTS
+	main

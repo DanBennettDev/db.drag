@@ -75,15 +75,17 @@ Output modes
 #define BOUND_H_DEFAULT 1.0
 #define DCBLOCK_GAIN 0.998		   // Steepness of DC block filter
 #define DRAGCURVE 1			  	  // default Scaling for drag vs freq
-#define DRAGCURVEMIN 0.7	     // minimum scaling
-#define DRAGCURVEMAX 1			// max scaling
-#define DRAG_DEFAULT 0.01	   // Default (input) value for drag
+#define DRAGCURVEMIN 1	     	 // minimum value for scaling curve
+#define DRAGCURVEMAX 2			// max value for scaling curve
+#define DRAGCLIP 8
 
-#define DRAGMIN_IN 0		  // min input from max for drag param 0 127 0.0002 1. 1.09
-#define DRAGMIN_OUT 0.0000002 // min scaled value
-#define DRAGMAX_IN 127.		// min input from max
-#define DRAGMAX_OUT 1   // max scaled value
-#define DRAGSCALER 1.09	  // exponent for scaling
+#define DRAG_DEFAULT 0.2f	    // Default (input) value for drag
+#define DRAGMIN_IN 0		   // min input from max for drag param 0 127 0.0002 1. 1.09
+#define DRAGMIN_OUT 0.00002f
+#define DRAGMAX_IN 1.f		 // min input from max
+#define DRAGMAX_OUT 0.5f    // max scaled value
+#define DRAGSCALER 1.09f	  // exponent for scaling
+
 #define FMIN 0.001			 // minimum freq for ball
 #define FMAX 15000.f		// maximum freq for ball
 #define LKTBL_LNGTH 2048
@@ -172,7 +174,6 @@ void	drag_shape_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void	drag_fmax_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void 	drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
 void 	drag_dragcurv_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv);
-
 
 // Audio Calc functions
 void 	drag_PerformWrapper(t_drag *x, t_object *dsp64, double **ins, long numins, double **outs, long numouts, long sampleframes, long flags, void *userparam);
@@ -481,10 +482,10 @@ void drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 {
 	t_double f;
 	atom_arg_getdouble(&f, 0, argc, argv);
-	if (f<0) f=0;
-	if (f>1) f=1;
-	f = danScaler(f*127., DRAGMIN_IN, DRAGMAX_IN, DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
-	x->drag = f/10;
+	if (f<DRAGMIN_IN) f=DRAGMIN_IN;
+	if (f>DRAGMAX_IN) f=DRAGMAX_IN;
+	x->drag = danScaler(f*127.f, 0, 127., DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
+
 	post("%f", x->drag);
 }
 
@@ -493,15 +494,15 @@ void drag_dragcurv_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 {
 	t_double f;
 	atom_arg_getdouble(&f, 0, argc, argv);
-	if(f<=0){
+	if(f<=1){
 		x->dragCurve = DRAGCURVEMIN;
-	} else if (f>1){
+	} else if (f>3){
 		x->dragCurve = DRAGCURVEMAX;
 	} else {
-		x->dragCurve = (f * (DRAGCURVEMAX - DRAGCURVEMIN)) + DRAGCURVEMIN;
+		x->dragCurve = f;
 	}
-	post("%f", x->dragCurve);
 }
+
 
 
 /************************************************************
@@ -704,7 +705,10 @@ void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, 
 			// apply drag if ball is not being driven (if input hz <= current hz)
 			if(x->hzActual[v] > *hz[v]) { //FREE - apply drag
 				x->isfree[v] = 1;
-				x->hzActual[v] = x->hzActual[v] - (pow(x->hzActual[v],x->dragCurve) * x->drag);
+				double fric =pow((x->drag*x->hzActual[v]),x->dragCurve) ;
+				fric = fric>(x->hzActual[v]/DRAGCLIP) ? x->hzActual[v]/DRAGCLIP : fric;
+				x->hzActual[v] = x->hzActual[v] -fric;
+
 				if(x->hzActual[v] < *hz[v]) f0 = x->hzActual[v] = *hz[v];
 			} else {					//DRIVEN - don't apply drag
 				x->isfree[v] = 0;

@@ -10,17 +10,14 @@
 	Version:		0.1
 	
 	TODO:
-		1) make basic version work - just add drag
-				X Strip out FM calcs
-				x message handling to set drag
-				x argument to set initial drag
-				x free/driven handling for voices
-				x change calcs to use actual rate, not input rate
-				x drag calculations
-				- get signal inputs working for hz
-				- Make Drag calcs actually do something!
 
 		2) Output Modes
+			-Velocity of impacts - held until next impact
+				-ISSUE - currently very erratic dsp
+				-ISSUE - "crashes" decrease as vel decreases, but then at a point, INCREASE!?
+
+			-Velocity of ball - same, without decay between impacts
+			-Direction
 
 		3) Lanes
 				- sort ordering of calculations based on positions
@@ -29,6 +26,21 @@
 
 		4) Momentum transfer
 
+	DONE:
+
+		1) make basic version work - just add drag
+			X Strip out FM calcs
+			x message handling to set drag
+			x argument to set initial drag
+			x free/driven handling for voices
+			x change calcs to use actual rate, not input rate
+			x drag calculations
+			x get signal inputs working for hz
+			x Make Drag calcs actually do something!
+
+		2) Output Modes
+			x add mode infrastructure
+			xPath of balls (as drag~) (0 & 1 - waveshape & ptr)
 
 	IDEAS:
 
@@ -73,6 +85,8 @@ Output modes
 #define BOUND_H_MAX 99.
 #define BOUND_L_DEFAULT -1.0
 #define BOUND_H_DEFAULT 1.0
+#define CRASHMAX 30
+
 #define DCBLOCK_GAIN 0.998		   // Steepness of DC block filter
 #define DRAGCURVE 1			  	  // default Scaling for drag vs freq
 #define DRAGCURVEMIN 1	     	 // minimum value for scaling curve
@@ -125,6 +139,7 @@ typedef struct _drag {
 	t_double	  bound_hi;		// upper bound for entire ensemble
 	t_double	drag;
 	t_double	dragCurve;
+	t_double  maxcrash;
 	t_double	  **hz;			// "master" pitch for each voice
 	t_double	  *hzFloat;
 	t_double	*hzActual;	// actual current pitch of the ball
@@ -132,6 +147,9 @@ typedef struct _drag {
 	t_double  *grad;		// variable for optimising non-signal rate calcs of symm
 
 	t_double  *ball_loc;	// location of the ball
+	t_double  *crash;		// last impact of ball
+	t_double  *lastcrash;
+
 	t_int	  *direction;	// current direction of ball (-1/1)
 	t_double	  *shape;
 	t_double	  **out;		// output pointer
@@ -180,6 +198,7 @@ void 	drag_PerformWrapper(t_drag *x, t_object *dsp64, double **ins, long numins,
 void 	drag_perform64(t_drag *x, double **ins, double **outs, long sampleframes, void (*voicemode)(t_drag *, t_double, t_double, t_double, t_double));
 void	 drag_ptr_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t);
 void 	drag_shaper_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t);
+void 	drag_impact_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t);
 
 t_double  drag_dcblock(t_double input, t_double *lastinput, t_double *lastoutput, t_double gain);
 t_double ptr_correctmax(t_double p, t_double a, t_double b, t_double t, t_double pmin, t_double pmax);
@@ -223,7 +242,7 @@ int C74_EXPORT main (void)
 	post("args:- 1) no of voices (default 1 - henceforth \"n\") ");
 	post("args:- 2) Lower bound for voice 1 (default -1)");
 	post("args:- 3) Upper bound for voice n (default 1) ");
-	post("args:- 4) mode - 0: waveshaping 1: antialiased triangle (via ptr) ");
+	post("args:- 4) mode -  ");
 
 	// report to the MAX window
 	return 0;
@@ -241,6 +260,8 @@ void drag_dsp_free (t_drag *x)
 	t_freebytes(x->grad, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->ball_loc, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->shape, x->voice_count * sizeof(t_double ));
+	t_freebytes(x->crash, x->voice_count * sizeof(t_double ));
+	t_freebytes(x->lastcrash, x->voice_count * sizeof(t_double ));
 	t_freebytes(x->direction, x->voice_count * sizeof(t_int ));
 	t_freebytes(x->hz_conn, x->voice_count * sizeof(t_int ));
 	t_freebytes(x->symm_conn, x->voice_count * sizeof(t_int ));
@@ -265,6 +286,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->mode = 0;
 	x->drag = DRAG_DEFAULT;
 	x->dragCurve = DRAGCURVE;
+	x->maxcrash = log(CRASHMAX);
 	x->fmax = FMAX * 0.5;
 	x->bound_lo = bound_lo; 
 	x->bound_hi = bound_hi;
@@ -273,7 +295,7 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	atom_arg_getdouble(&(x->bound_hi), 2, argc, argv);
 	x->mode = atom_getintarg(3,argc,argv); 
 	if(x->mode < 0) x->mode = 0;
-	else if (x->mode > 1) x->mode = 1;
+	else if (x->mode > 4) x->mode = 4;
 	atom_arg_getdouble(&(x->drag), 4, argc, argv);
 
 	//protect against invalid parameters
@@ -303,6 +325,8 @@ void *drag_new(t_symbol *s, short argc, t_atom *argv)
 	x->hzActual = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->grad = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->ball_loc = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
+	x->crash = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
+	x->lastcrash = (t_double *) t_getbytes(x->voice_count * sizeof(t_double));
 	x->direction = (t_int *) t_getbytes(x->voice_count * sizeof(t_int));
 	x->hz_conn = (t_int *) t_getbytes(x->voice_count * sizeof(t_int));
 	x->symm_conn = (t_int *) t_getbytes(x->voice_count * sizeof(t_int));
@@ -484,7 +508,6 @@ void drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 	atom_arg_getdouble(&f, 0, argc, argv);
 	x->drag = danScaler(f, DRAGMIN_IN, DRAGMAX_IN, DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
 
-	post("%f", x->drag);
 }
 
 // MSG "drag" symbol input + float sets global drag
@@ -623,8 +646,10 @@ void 	drag_PerformWrapper(t_drag *x, t_object *dsp64, double **ins, long numins,
 {
 	if(x->mode==0){
 		drag_perform64(x, ins, outs, sampleframes, &drag_shaper_voicecalc);
-	} else{
+	} else if (x->mode==1){
 		drag_perform64(x, ins, outs, sampleframes, &drag_ptr_voicecalc);
+	} else {
+		drag_perform64(x, ins, outs, sampleframes, &drag_impact_voicecalc);
 	}
 }
 
@@ -856,4 +881,61 @@ void drag_shaper_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, 
 		*p = lo, *dir = +1;
 	}
 	*out = (t_double) do_shaping(x, lo, hi);
+}
+
+
+
+void drag_impact_voicecalc (t_drag *x, t_double lo, t_double hi, t_double grad, t_double t)
+{
+	t_double b, b_over_a;
+	t_double *p, *out;
+	t_int v;
+	t_int *dir;
+
+	v = x->curr_v;
+	dir = &x->direction[v];
+	p = &x->ball_loc[v];
+	out = x->out[v];
+
+	//cursor movement calcs
+	if(*dir == 1){ //rising
+		*p = *p + (2 * grad * t);
+		if(*p >= hi){ // TRANSITION
+			b_over_a = -1/(grad-1);
+			*p = (hi + (*p - hi)*b_over_a);
+			*dir = -1;
+			if(v < x->voice_count - 2){
+				*(dir+1) = 1;
+				x->crash[v] =  fabs(x->hzActual[v] + (x->hzActual[v+1] * x->direction[v+1] * - 1));
+			} else {
+				x->crash[v] =  x->hzActual[v];
+			}
+			//scale impact
+			x->lastcrash[v] = log(x->crash[v])*x->direction[v]/x->maxcrash;
+		//	if(x->lastcrash[v] > 1) x->lastcrash[v] = 1.f;
+		}
+	} else { // counting down
+		b = -grad/(grad-1);
+		*p = *p + (2 * b * t);
+		if(*p <= lo){ // TRANSITION
+			*p = (lo + (*p - lo)*(grad/b));
+			*dir = 1;
+			if(v > 0){
+				*(dir-1) = -1;
+				x->crash[v] =  fabs(x->hzActual[v] + (x->hzActual[v+1] * x->direction[v-1]));
+			} else {
+				x->crash[v] =  x->hzActual[v];
+			}
+			//scale impact
+			x->lastcrash[v] = log(x->crash[v])*x->direction[v]/x->maxcrash;
+		//	if(x->lastcrash[v] > 1) x->lastcrash[v] = 1.f;
+		}
+	}
+
+	if(*p > hi) {
+		*p = hi, *dir = -1;
+	} else if(*p < lo) {
+		*p = lo, *dir = +1;
+	}
+	*out = x->lastcrash[v];
 }

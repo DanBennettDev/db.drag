@@ -17,6 +17,8 @@
 #include "jit.math.h"
 #include "ext_obex.h"
 
+double danScaler(t_double x, t_double in_l, t_double in_h, t_double out_l, t_double out_h, t_double pow);
+double danScaler_lin(t_double x, t_double in_l, t_double in_h, t_double out_l, t_double out_h);
 
 
 double danScaler(t_double x, t_double in_l, t_double in_h, t_double out_l, t_double out_h, t_double pow)
@@ -37,6 +39,6 @@ double danScaler_lin(t_double x, t_double in_l, t_double in_h, t_double out_l, t
 	if(x<in_l) x=in_l;
 	else if(x>in_h) x=in_h;
 
-	return ((x-in_l)*sc*(out_h-out_l)/(in_h-in_l)) + out_l;
+	return ((x-in_l)*(x-in_l)/(in_h-in_l)*(out_h-out_l)/(in_h-in_l)) + out_l;
 }
 

@@ -83,8 +83,8 @@ Output modes
 #define DRAGMIN_IN 0		   // min input from max for drag param 0 127 0.0002 1. 1.09
 #define DRAGMIN_OUT 0.00002f
 #define DRAGMAX_IN 1.f		 // min input from max
-#define DRAGMAX_OUT 0.5f    // max scaled value
-#define DRAGSCALER 1.09f	  // exponent for scaling
+#define DRAGMAX_OUT 0.05f    // max scaled value
+#define DRAGSCALER 8.66f	  // exponent for scaling
 
 #define FMIN 0.001			 // minimum freq for ball
 #define FMAX 15000.f		// maximum freq for ball
@@ -482,9 +482,7 @@ void drag_drag_set(t_drag *x, t_symbol *msg, short argc, t_atom *argv)
 {
 	t_double f;
 	atom_arg_getdouble(&f, 0, argc, argv);
-	if (f<DRAGMIN_IN) f=DRAGMIN_IN;
-	if (f>DRAGMAX_IN) f=DRAGMAX_IN;
-	x->drag = danScaler(f*127.f, 0, 127., DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
+	x->drag = danScaler(f, DRAGMIN_IN, DRAGMAX_IN, DRAGMIN_OUT, DRAGMAX_OUT, DRAGSCALER);
 
 	post("%f", x->drag);
 }
